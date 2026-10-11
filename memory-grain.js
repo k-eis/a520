@@ -1,14 +1,13 @@
 // ── Memory Grain a520 エフェクトエンジン
-// Polaroid a520（2002年発売想定・CCD/初期デジカメ）の「不完全さ」を再現する9パラメータ（01-05 基本 / 06-09 光の癖）:
+// Polaroid a520（2002年発売想定・CCD/初期デジカメ）の「不完全さ」を再現する8パラメータ（01-05 基本 / 06-08 光の癖）:
 // 01 MEMORY COLOR  → CCDの暖色系シフト。青緑は鮮やかに、赤は柔らかく深く
 // 02 BLOOM         → ハイライトが白飛びせず、じわっと光に溶ける
 // 03 SOFT EDGE     → 解像感はあるが強調しない、MTF的な柔らかい境界遷移
 // 04 GRAIN         → CCD特有のノイズ。欠点ではなく記憶の質感
 // 05 COMPRESS      → ダイナミックレンジ圧縮。ハイライト/シャドウを持ち上げて印象派的なトーンに
-// 06 FLARE         → 逆光の光源から放射状に伸びる光芒＋レンズ内ゴースト
-// 07 HAZE          → 黒浮き＋暖色のヴェール。空気ごと霞んだ記憶
-// 08 VIGNETTE      → 四隅が落ちる周辺減光
-// 09 LIGHT LEAK    → 画像の端からにじむ暖色の光漏れ（UNSTABLE時は出る辺が変わる）
+// 06 HAZE          → 黒浮き＋暖色のヴェール。空気ごと霞んだ記憶
+// 07 VIGNETTE      → 四隅が落ちる周辺減光
+// 08 LIGHT LEAK    → 画像の端からにじむ暖色の光漏れ（UNSTABLE時は出る辺が変わる）
 // (2段階プレビュー処理・ノイズ関数・iOS保存はClair de Lune / Structural Driftの既存資産を移植)
 
 const dropZone = document.getElementById('dropZone');
@@ -22,7 +21,6 @@ const bloomSlider = document.getElementById('bloom');
 const softEdgeSlider = document.getElementById('softEdge');
 const grainSlider = document.getElementById('grain');
 const compressSlider = document.getElementById('compress');
-const flareSlider = document.getElementById('flare');
 const hazeSlider = document.getElementById('haze');
 const vignetteSlider = document.getElementById('vignette');
 const leakSlider = document.getElementById('leak');
@@ -35,7 +33,6 @@ const bloomVal = document.getElementById('bloomVal');
 const softEdgeVal = document.getElementById('softEdgeVal');
 const grainVal = document.getElementById('grainVal');
 const compressVal = document.getElementById('compressVal');
-const flareVal = document.getElementById('flareVal');
 const hazeVal = document.getElementById('hazeVal');
 const vignetteVal = document.getElementById('vignetteVal');
 const leakVal = document.getElementById('leakVal');
@@ -233,7 +230,6 @@ function applyMemoryGrain(preview) {
   let softEdge = parseInt(softEdgeSlider.value) / 100;
   let grain = parseInt(grainSlider.value) / 100;
   let compress = parseInt(compressSlider.value) / 100;
-  let flare = parseInt(flareSlider.value) / 100;
   const haze = parseInt(hazeSlider.value) / 100;
   const vignette = parseInt(vignetteSlider.value) / 100;
   let leak = parseInt(leakSlider.value) / 100;
@@ -251,8 +247,7 @@ function applyMemoryGrain(preview) {
     // ブルームは裏技の「白飛び」を再現するため、プラス側に偏らせる（たまに大暴れする）
     bloom = Math.max(0, Math.min(1, bloom + Math.max(0, pseudoRandom(seed + 3) - 0.35) * v * 1.4));
     exposureShift = (pseudoRandom(seed + 4) - 0.5) * v * 90;
-    // フレアは強弱が揺らぎ、光漏れは「今日は出る日」だけ顔を出す（出る辺も毎回変わる）
-    flare = Math.max(0, Math.min(1, flare + (pseudoRandom(seed + 5) - 0.5) * v * 0.6));
+    // 光漏れは「今日は出る日」だけ顔を出す（出る辺も毎回変わる）
     leak  = Math.max(0, Math.min(1, leak  + Math.max(0, pseudoRandom(seed + 6) - 0.4) * v * 1.0));
   }
 
@@ -326,90 +321,7 @@ function applyMemoryGrain(preview) {
     }
   }
 
-  // ── STEP 3b: FLARE（逆光の光源を探して、そこから光芒とゴーストを重ねる）
-  if (flare > 0.01) {
-    const TWO_PI = Math.PI * 2;
-    const diag = Math.sqrt(w * w + h * h);
-
-    // 光源検出：白飛びしている領域の重心（見つからなければ画面右上の外側を仮の光源にする）
-    let sx = 0, sy = 0, sw = 0, cnt = 0, sampled = 0;
-    for (let y = 0; y < h; y += 2) {
-      for (let x = 0; x < w; x += 2) {
-        sampled++;
-        const i = (y*w+x)*4;
-        const lum = out[i]*0.299 + out[i+1]*0.587 + out[i+2]*0.114;
-        if (lum > 235) { const wt = lum - 235; sx += x*wt; sy += y*wt; sw += wt; cnt++; }
-      }
-    }
-    let srcX, srcY, srcStrength;
-    if (sw > 0 && cnt / sampled > 0.0005) {
-      srcX = sx / sw; srcY = sy / sw;
-      srcStrength = 0.55 + 0.45 * Math.min(1, (cnt / sampled) * 25);
-    } else {
-      srcX = w * 0.82; srcY = h * 0.12; srcStrength = 0.4;
-    }
-
-    // 光芒テーブル（角度ごとの強さ。まばらに尖った筋になるよう乱数を累乗してからなじませる）
-    const RAYS = 360;
-    const raySeed = unstable ? applyGeneration * 5.3 : 0;
-    const rawRays = new Float32Array(RAYS);
-    for (let k = 0; k < RAYS; k++) rawRays[k] = Math.pow(pseudoRandom(k * 7.31 + 11 + raySeed), 2.2);
-    const rayTable = new Float32Array(RAYS);
-    for (let k = 0; k < RAYS; k++) {
-      rayTable[k] = (rawRays[(k + RAYS - 1) % RAYS] + 2 * rawRays[k] + rawRays[(k + 1) % RAYS]) * 0.25 * 1.8;
-    }
-
-    // ゴースト：光源→画面中心を結ぶ線の上に、色のついた丸い像が並ぶ
-    const cx = w / 2, cy = h / 2;
-    const ghostDefs = [
-      { t: 0.45, r: diag * 0.035, c: [255, 170, 90]  },
-      { t: 1.35, r: diag * 0.060, c: [90, 200, 170]  },
-      { t: 1.75, r: diag * 0.045, c: [190, 110, 220] },
-      { t: 2.20, r: diag * 0.085, c: [255, 200, 120] },
-    ];
-    const ghosts = ghostDefs.map(g => ({
-      x: srcX + (cx - srcX) * g.t, y: srcY + (cy - srcY) * g.t, r: g.r, c: g.c
-    }));
-    const rayGain = flare * 0.55 * srcStrength;
-    const ghostGain = flare * 0.5 * srcStrength;
-
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const i = (y*w+x)*4;
-        const dx = x - srcX, dy = y - srcY;
-        const d = Math.sqrt(dx*dx + dy*dy);
-
-        // 光芒
-        let ang = Math.atan2(dy, dx); if (ang < 0) ang += TWO_PI;
-        const fk = ang / TWO_PI * RAYS;
-        const k0 = Math.floor(fk) % RAYS, k1 = (k0 + 1) % RAYS, fr = fk - Math.floor(fk);
-        const ray = rayTable[k0] * (1 - fr) + rayTable[k1] * fr;
-        const a = Math.min(1, ray * Math.exp(-d / (diag * 0.5)) * rayGain);
-        let ar = a, ag = a * 0.93, ab = a * 0.78;
-
-        // ゴースト
-        for (let gi = 0; gi < ghosts.length; gi++) {
-          const g = ghosts[gi];
-          const gx = x - g.x, gy = y - g.y;
-          const gd2 = gx*gx + gy*gy;
-          const lim = g.r * 1.4;
-          if (gd2 > lim * lim) continue;
-          const q = Math.sqrt(gd2) / g.r;
-          const disc = q < 1 ? Math.pow(1 - q, 1.5) * 0.35 : 0;
-          const ringT = (q - 1) / 0.12;
-          const ring = Math.exp(-ringT * ringT) * 0.55;
-          const gv = (disc + ring) * ghostGain;
-          ar += gv * g.c[0] / 255; ag += gv * g.c[1] / 255; ab += gv * g.c[2] / 255;
-        }
-
-        out[i]   = 255 - (255 - out[i])   * (1 - Math.min(1, ar));
-        out[i+1] = 255 - (255 - out[i+1]) * (1 - Math.min(1, ag));
-        out[i+2] = 255 - (255 - out[i+2]) * (1 - Math.min(1, ab));
-      }
-    }
-  }
-
-  // ── STEP 3c: LIGHT LEAK（画像の端からにじむ暖色の光。UNSTABLE時は出る辺が毎回変わる）
+  // ── STEP 3b: LIGHT LEAK（画像の端からにじむ暖色の光。UNSTABLE時は出る辺が毎回変わる）
   if (leak > 0.01) {
     const side = unstable ? Math.floor(pseudoRandom(applyGeneration * 13.7 + 7) * 4) % 4 : 0; // 0左 1右 2上 3下
     const alongLen = (side < 2) ? h : w;
@@ -440,7 +352,7 @@ function applyMemoryGrain(preview) {
     }
   }
 
-  // ── STEP 3d: HAZE（黒を持ち上げ、暖色のヴェールをかける。暗部ほど深く霞む）
+  // ── STEP 3c: HAZE（黒を持ち上げ、暖色のヴェールをかける。暗部ほど深く霞む）
   if (haze > 0.01) {
     const vr = 238, vg = 230, vb = 216;
     for (let i = 0; i < out.length; i += 4) {
@@ -452,7 +364,7 @@ function applyMemoryGrain(preview) {
     }
   }
 
-  // ── STEP 3e: VIGNETTE（四隅が落ちる。粒子より前＝レンズ側の癖として掛ける）
+  // ── STEP 3d: VIGNETTE（四隅が落ちる。粒子より前＝レンズ側の癖として掛ける）
   if (vignette > 0.01) {
     const vcx = w / 2, vcy = h / 2;
     for (let y = 0; y < h; y++) {
@@ -524,7 +436,7 @@ function applyMemoryGrain(preview) {
 }
 
 // ── UIイベント
-const allSliders = [memoryColorSlider, bloomSlider, softEdgeSlider, grainSlider, compressSlider, flareSlider, hazeSlider, vignetteSlider, leakSlider];
+const allSliders = [memoryColorSlider, bloomSlider, softEdgeSlider, grainSlider, compressSlider, hazeSlider, vignetteSlider, leakSlider];
 
 allSliders.forEach(slider => {
   slider.addEventListener('pointerdown', () => { isDragging = true; });
@@ -568,11 +480,6 @@ compressSlider.addEventListener('input', () => {
   clearPresetActive();
   requestApply();
 });
-flareSlider.addEventListener('input', () => {
-  flareVal.textContent = flareSlider.value + '%';
-  clearPresetActive();
-  requestApply();
-});
 hazeSlider.addEventListener('input', () => {
   hazeVal.textContent = hazeSlider.value + '%';
   clearPresetActive();
@@ -604,10 +511,10 @@ unstableCheckbox.addEventListener('change', () => applyMemoryGrain());
 
 // ── Camera Mood プリセット（過激化版）
 const CAMERA_MOOD_PROFILES = {
-  a520:      { memoryColor: 45, bloom: 30, softEdge: 25, grain: 25, compress: 30, flare: 15, haze: 18, vignette: 25, leak: 10 }, // 標準
-  faded:     { memoryColor: 55, bloom: 40, softEdge: 35, grain: 32, compress: 50, flare: 10, haze: 40, vignette: 20, leak: 15 }, // 色褪せた記憶
-  nostalgia: { memoryColor: 75, bloom: 60, softEdge: 50, grain: 45, compress: 70, flare: 25, haze: 30, vignette: 45, leak: 30 }, // 強くノスタルジック
-  blowout:   { memoryColor: 20, bloom: 95, softEdge: 30, grain: 20, compress: 15, flare: 55, haze: 45, vignette: 10, leak: 20 }, // 白飛び・裏技風
+  a520:      { memoryColor: 45, bloom: 30, softEdge: 25, grain: 12, compress: 30, haze: 18, vignette: 25, leak: 10 }, // 標準
+  faded:     { memoryColor: 55, bloom: 40, softEdge: 35, grain: 32, compress: 50, haze: 40, vignette: 20, leak: 15 }, // 色褪せた記憶
+  nostalgia: { memoryColor: 75, bloom: 60, softEdge: 50, grain: 45, compress: 70, haze: 30, vignette: 45, leak: 30 }, // 強くノスタルジック
+  blowout:   { memoryColor: 20, bloom: 95, softEdge: 30, grain: 20, compress: 15, haze: 45, vignette: 10, leak: 20 }, // 白飛び・裏技風
 };
 
 presetBtns.forEach(btn => {
@@ -624,8 +531,6 @@ presetBtns.forEach(btn => {
     grainVal.textContent = profile.grain + '%';
     compressSlider.value = profile.compress;
     compressVal.textContent = profile.compress + '%';
-    flareSlider.value = profile.flare;
-    flareVal.textContent = profile.flare + '%';
     hazeSlider.value = profile.haze;
     hazeVal.textContent = profile.haze + '%';
     vignetteSlider.value = profile.vignette;
